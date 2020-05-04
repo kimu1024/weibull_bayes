@@ -7,18 +7,20 @@ import matplotlib.pyplot as plt
 class WeibullTest():
     """ワイブル分布に従う寿命試験のシミュレーションを行う"""
 
-    def __init__(self, num=10, weibull_m=1.3, weibull_eta=100.0, censored_prob=0):
+    def __init__(self, num=10, weibull_mu=1.3, weibull_eta=100.0, exp_lambda=0, censored_time=None):
         """シミュレーション条件の初期化
 
         Args:
             num: int, 試験点数
-            weibull_m: float, ワイブル係数(形状パラメータ)
+            weibull_mu: float, ワイブル係数(形状パラメータ)
             weibull_eta: float, 尺度パラメータ
-            censored_prob: 打ち切りデータの発生確率 (機能実装中、現状は0以外は動作非保証)
+            exp_lambda: トラブルなどによる試験の中断が指数分布に従い発生すると仮定 (本値が0の場合中断は発生しない)
+            censored_time: float, 試験打ち切り時間(この時間を超える試験データは打ち切りとする)
 
         """
-        self.weibull_param = [float(weibull_m), float(weibull_eta)]
-        self.censored_prob = float(censored_prob)
+        self.weibull_param = [float(weibull_mu), float(weibull_eta)]
+        self.exp_lambda = float(exp_lambda)
+        self.censored_time = float(censored_time) if censored_time else None
         self.dist = torch.distributions.Weibull(torch.tensor([self.weibull_param[1]]),
                                                 torch.tensor([self.weibull_param[0]]))
         self.order = []
@@ -37,7 +39,16 @@ class WeibullTest():
                 self.sample[:,3] = 不信頼度 (メディアンランク法)
         """
         time = self.dist.sample([self.num]).squeeze()
-        cens = torch.distributions.bernoulli.Bernoulli(self.censored_prob).sample([self.num]).squeeze()
+        if self.exp_lambda > 0:
+            cens_time = torch.distributions.exponential.Exponential(self.exp_lambda).sample([self.num]).squeeze()
+            cens = (cens_time < time).float()
+            time[cens == 1.0] = cens_time[cens == 1.0]
+        else:
+            cens = torch.zeros(self.num, dtype=torch.float)
+        if self.censored_time:
+            cens[time > self.censored_time] = 1.0
+            time[time > self.censored_time] = self.censored_time
+
         self.sample = torch.stack([time, cens], dim=1)
         self.sample = self.sample[self.sample.argsort(dim=0)[:, 0]]
         self._calc_order()
@@ -90,7 +101,7 @@ class WeibullTest():
         """
         return np.log(np.log(1 / (1 - unreliability)))
 
-    def make_plot(self, show=False, figsize=(10, 5)):
+    def make_plot(self, show=False, plot_theoritical=False, figsize=(10, 5)):
         """sampleのmatplotlib グラフを作成する。 subplots(nrow=1,ncols=2, figsize=(10,5)
         axes[0]がワイブルプロット(メディアンランク法), axes[1]が累積度数分布(cumulative histgram)
 
@@ -103,54 +114,78 @@ class WeibullTest():
              axes: matplotlib.pyplot.axes.Axes
         """
         data_break = self.sample[self.sample[:, 1] == 0]
-        x = data_break[:, 0]
-        y = self.convert_unreliability_to_y(data_break[:, 3])
+        data_censored = self.sample[self.sample[:, 1] == 1]
         fig, axes = plt.subplots(nrows=1, ncols=2, figsize=figsize)
 
         wp_y_ticks_possibility = [0.03, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
         wp_y_ticks_value = [self.convert_unreliability_to_y(p) for p in wp_y_ticks_possibility]
-        y_range = np.array([0.01, 0.999])
-        x_range = self._calc_inv_weibull_cumul_freq_dist(y_range)
+        y_range_p = np.array([0.01, 0.999])
+        y_range = self.convert_unreliability_to_y(y_range_p)
+        x_range = self._calc_inv_weibull_cumul_freq_dist(y_range_p, mu=self.weibull_param[0], eta=self.weibull_param[1])
         x_range[0] *= 0.5
         x_range[1] *= 2
+        wp_x_theory = np.logspace(np.log10(x_range[0]), np.log10(x_range[1]))
 
         axes[0].set_xscale('log')
         axes[0].set_xlim(x_range)
-        axes[0].set_ylim(self.convert_unreliability_to_y(y_range))
+        axes[0].set_ylim(y_range)
         axes[0].set_yticks(wp_y_ticks_value)
         axes[0].set_yticklabels(wp_y_ticks_possibility)
-        axes[0].scatter(x, y, label='simurated value'.format(self.num),
-                        s=10, marker='o', alpha=1, color='g'
-                        )
 
-        wp_x_theory = np.logspace(np.log10(x_range[0]), np.log10(x_range[1]))
-        estimated_line, m_es, eta_es = self.calc_estimated_value(data_break[:, [0, 3]], wp_x_theory)
+        if plot_theoritical:
+            axes[0].plot(wp_x_theory, self.convert_unreliability_to_y(
+                self._calc_weibull_cumul_freq_dist(wp_x_theory, mu=self.weibull_param[0], eta=self.weibull_param[1])),
+                         label='theoretical:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(self.weibull_param[0],
+                                                                                        self.weibull_param[1]),
+                         color='black',
+                         alpha=0.5, linestyle='--')
 
-        axes[0].plot(wp_x_theory, self.convert_unreliability_to_y(self._calc_weibull_cumul_freq_dist(wp_x_theory)),
-                     label='theoretical:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(self.weibull_param[0],
-                                                                              self.weibull_param[1]), color='black',
-                     alpha=0.5, linestyle='--')
+        if len(data_break[:, 0]) > 0:
+            x = data_break[:, 0]
+            y = self.convert_unreliability_to_y(data_break[:, 3])
 
-        axes[0].plot(estimated_line[0], estimated_line[1],
-                     label='estimated:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(m_es, eta_es),
-                     linestyle='--', color='g', alpha=1)
+            axes[0].scatter(x, y, label='simurated value',
+                            s=10, marker='o', alpha=1, color='g'
+                            )
+            estimated_line, m_es, eta_es = self.calc_estimated_value(data_break[:, [0, 3]], wp_x_theory)
+            axes[0].plot(estimated_line[0], estimated_line[1],
+                         label='estimated:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(m_es, eta_es),
+                         linestyle='--', color='g', alpha=1)
+
+        num_censored = len(data_censored[:, 0])
+        if num_censored > 0:
+            axes[0].scatter(data_censored[:, 0],
+                            np.array([(y_range[0] + wp_y_ticks_value[0]) / 2 for i in range(num_censored)]),
+                            label='censored data\n (num = {})'.format(num_censored), s=8, marker='x', alpha=1,
+                            color='r')
+
+
         axes[0].legend()
         axes[0].set_title('Weibull plot (N={0})'.format(self.num))
         axes[0].set_ylabel('Probability of Failure')
         axes[0].set_xlabel('time')
+        axes[0].grid(True, which='minor', axis='x')
 
-        axes[1].hist(data_break[:, 0], label='simulated', histtype='stepfilled',
-                     cumulative=True, density=True, alpha=0.5, color='g',
-                     bins=np.logspace(np.log10(x_range[0]), np.log10(x_range[1]), 100))
+        if plot_theoritical:
+            axes[1].plot(wp_x_theory, self._calc_weibull_cumul_freq_dist(wp_x_theory, mu=self.weibull_param[0],
+                                                                         eta=self.weibull_param[1]),
+                         label='theoretical', color='black',
+                         linestyle='--', alpha=0.5)
 
-        axes[1].plot(wp_x_theory, self._calc_weibull_cumul_freq_dist(wp_x_theory), label='theoretical', color='black',
-                     linestyle='--', alpha=0.5)
+        if len(data_break[:, 0]) > 0:
+            axes[1].plot(wp_x_theory, self._calc_weibull_cumul_freq_dist(wp_x_theory, mu=m_es, eta = eta_es),
+                         label='estimated', color='g',
+                         linestyle='--', alpha=0.8)
+            axes[1].plot(data_break[:, 0], data_break[:, 3], label='simulated value', color='g', alpha=1, linewidth=3)
+
+
         axes[1].set_xscale('log')
         axes[1].set_xlim(x_range)
         axes[1].legend()
         axes[1].set_title('cumulative histgram (N={0})'.format(self.num))
         axes[1].set_ylabel('Probability of Failure')
         axes[1].set_xlabel('time')
+        axes[1].grid(True, which='minor', axis='x')
 
         if show:
             plt.show()
@@ -178,15 +213,14 @@ class WeibullTest():
 
         return estimate_line, m_es, eta_es
 
-    def _calc_weibull_cumul_freq_dist(self, x):
-        return 1 - np.exp(-(x / self.weibull_param[1]) ** self.weibull_param[0])
+    def _calc_weibull_cumul_freq_dist(self, x, mu, eta):
+        return 1 - np.exp(-(x / eta) ** mu)
 
-    def _calc_inv_weibull_cumul_freq_dist(self, y):
-        return (-np.log(1 - y)) ** (1 / self.weibull_param[0]) * self.weibull_param[1]
+    def _calc_inv_weibull_cumul_freq_dist(self, y, mu, eta):
+        return (-np.log(1 - y)) ** (1 / mu) * eta
 
 
 if __name__ == '__main__':
-    m = WeibullTest(10, weibull_m=1.3, weibull_eta=100, censored_prob=0.0)
-    sns.set()
-    # sns.set_style('ticks')
-    fig, axes = m.make_plot(show=True)
+    m = WeibullTest(10, weibull_mu=1.3, weibull_eta=100, exp_lambda=0.01)
+    sns.set(style = "whitegrid")
+    fig, axes = m.make_plot(show=True, plot_theoritical=True)
