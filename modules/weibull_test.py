@@ -26,7 +26,7 @@ class WeibullTest():
         self.order = []
         self.unreliability = []
         self.num = num
-        self.sample = self._make_samples()
+        self.test_data = self._make_samples()
 
     def _make_samples(self):
         """サンプルデータ作成
@@ -49,14 +49,14 @@ class WeibullTest():
             cens[time > self.censored_time] = 1.0
             time[time > self.censored_time] = self.censored_time
 
-        self.sample = torch.stack([time, cens], dim=1)
-        self.sample = self.sample[self.sample.argsort(dim=0)[:, 0]]
+        self.test_data = torch.stack([time, cens], dim=1)
+        self.test_data = self.test_data[self.test_data.argsort(dim=0)[:, 0]]
         self._calc_order()
         self._calc_unreliability()
 
-        self.sample = torch.cat([self.sample, self.order.unsqueeze(1)], dim=1)
-        self.sample = torch.cat([self.sample, self.unreliability.unsqueeze(1)], dim=1)
-        return self.sample
+        self.test_data = torch.cat([self.test_data, self.order.unsqueeze(1)], dim=1)
+        self.test_data = torch.cat([self.test_data, self.unreliability.unsqueeze(1)], dim=1)
+        return self.test_data
 
     def get_samples(self):
         """サンプルデータの取得
@@ -68,24 +68,24 @@ class WeibullTest():
                 self.sample[:,2] = 順序統計量 (Johnsonの方法)
                 self.sample[:,3] = 不信頼度 (メディアンランク法)
         """
-        return self.sample
+        return self.test_data
 
     def _calc_order(self):
         """順序統計量をJohnsonの方法により計算する
         """
         self.order = torch.zeros([self.num])
-        if self.sample[0, 1] == 0:
+        if self.test_data[0, 1] == 0:
             self.order[0] = 1
         else:
             self.order[0] = 0
 
         for i in range(1, self.num):
-            orderCorrection = (self.num + 1 - self.order[i - 1]) / (1 + (self.num - i))
-            if self.sample[i, 1] == 1:
+            order_correction = (self.num + 1 - self.order[i - 1]) / (1 + (self.num - i))
+            if self.test_data[i, 1] == 1:
                 self.order[i] = self.order[i - 1]
             else:
-                self.order[i] = self.order[i - 1] + orderCorrection
-        self.order = self.order
+                self.order[i] = self.order[i - 1] + order_correction
+
 
     def _calc_unreliability(self):
         """試験データから不信頼度を計算する(メディアンランク法)"""
@@ -113,8 +113,8 @@ class WeibullTest():
              fig: matplotlib.pyplot.figure
              axes: matplotlib.pyplot.axes.Axes
         """
-        data_break = self.sample[self.sample[:, 1] == 0]
-        data_censored = self.sample[self.sample[:, 1] == 1]
+        data_break = self.test_data[self.test_data[:, 1] == 0]
+        data_censored = self.test_data[self.test_data[:, 1] == 1]
         fig, axes = plt.subplots(nrows=1, ncols=2, figsize=figsize)
 
         wp_y_ticks_possibility = [0.03, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
@@ -149,7 +149,7 @@ class WeibullTest():
                             )
             estimated_line, m_es, eta_es = self.calc_estimated_value(data_break[:, [0, 3]], wp_x_theory)
             axes[0].plot(estimated_line[0], estimated_line[1],
-                         label='estimated:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(m_es, eta_es),
+                         label='estimated by LSM:\n  $\\mu$={0:.2f}, $\\eta$={1:.1f}'.format(m_es, eta_es),
                          linestyle='--', color='g', alpha=1)
 
         num_censored = len(data_censored[:, 0])
